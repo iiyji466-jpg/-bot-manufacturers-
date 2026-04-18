@@ -481,7 +481,7 @@ def main():
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print(f"✅ HTTP server running on port {port}")
 
-    TOKEN = "8297443710:AAGdxFDGNfy8xQACikdz60E075SibSgZvcI"
+    TOKEN = "8297443710:AAEtkl_-iqII7n88yRQcJ1sfFKVt4oT_iD0"
 
     app = Application.builder().token(TOKEN).build()
 
@@ -513,7 +513,8 @@ def main():
     app.add_handler(conv)
 
     print("🚀 Bot Factory is running...")
-    app.run_polling()
+    import asyncio
+    asyncio.run(app.run_polling())
 
 
 if __name__ == "__main__":
