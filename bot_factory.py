@@ -1,73 +1,70 @@
-import logging
-import json
 import os
+import json
+import logging
+import threading
 import subprocess
 import sys
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, filters, ContextTypes, ConversationHandler
 )
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 
 # ===== مراحل المحادثة =====
 (
-    ASK_TOKEN,
-    ASK_WELCOME,
-    ASK_COMMANDS_CHOICE,
-    ASK_COMMAND_NAME,
-    ASK_COMMAND_REPLY,
-    ASK_MORE_COMMANDS,
-    ASK_AUTO_REPLY_CHOICE,
-    ASK_AUTO_KEYWORD,
-    ASK_AUTO_RESPONSE,
-    ASK_MORE_AUTO,
-    ASK_SCHEDULE_CHOICE,
-    ASK_SCHEDULE_CHAT_ID,
-    ASK_SCHEDULE_MESSAGE,
-    ASK_SCHEDULE_INTERVAL,
-    CONFIRM,
+    STEP_TOKEN,
+    STEP_WELCOME,
+    STEP_CMD_CHOICE,
+    STEP_CMD_NAME,
+    STEP_CMD_REPLY,
+    STEP_CMD_MORE,
+    STEP_AUTO_CHOICE,
+    STEP_AUTO_KEYWORD,
+    STEP_AUTO_REPLY,
+    STEP_AUTO_MORE,
+    STEP_SCHEDULE_CHOICE,
+    STEP_SCHEDULE_CHAT,
+    STEP_SCHEDULE_MSG,
+    STEP_SCHEDULE_INTERVAL,
+    STEP_CONFIRM,
 ) = range(15)
 
-# ===== تخزين بيانات كل مستخدم مؤقتاً =====
-user_data_store = {}
+store = {}
 
-
-def get_main_keyboard():
+# ===== القوائم =====
+def main_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🤖 صنع بوت جديد", callback_data="new_bot")],
         [InlineKeyboardButton("📋 بوتاتي", callback_data="my_bots")],
     ])
 
-
-def yes_no_keyboard():
+def yes_no():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ نعم", callback_data="yes"),
          InlineKeyboardButton("❌ لا", callback_data="no")]
     ])
 
-
-# ===== /start =====
+# ===== start =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 *أهلاً! أنا بوت صانع البوتات*\n\n"
-        "أقدر أساعدك تصنع بوت Telegram خاص بك بدون كود!\n\n"
-        "اختر من القائمة:",
-        parse_mode="Markdown",
-        reply_markup=get_main_keyboard()
+        "👋 أهلاً! أنا صانع بوتات تيليجرام\n\nاختر:",
+        reply_markup=main_menu()
     )
 
-
-# ===== زر صنع بوت جديد =====
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ===== القائمة =====
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
+    uid = query.from_user.id
 
     if query.data == "new_bot":
-        user_data_store[user_id] = {
+        store[uid] = {
             "token": "",
             "welcome": "",
             "commands": {},
@@ -75,447 +72,275 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "schedule": []
         }
         await query.edit_message_text(
-            "🔑 *الخطوة 1: توكن البوت*\n\n"
-            "روح لـ @BotFather وصنع بوت جديد، ثم أرسل لي التوكن هنا:\n\n"
-            "مثال: `123456:ABCdef...`",
-            parse_mode="Markdown"
+            "🔑 أرسل توكن البوت من BotFather:"
         )
-        return ASK_TOKEN
+        return STEP_TOKEN
 
     elif query.data == "my_bots":
         bots_dir = "bots"
-        if not os.path.exists(bots_dir) or not os.listdir(bots_dir):
-            await query.edit_message_text(
-                "📭 ما عندك بوتات بعد!\n\nاضغط /start لتصنع بوت.",
-            )
+        if not os.path.exists(bots_dir):
+            await query.edit_message_text("📭 لا يوجد بوتات")
         else:
             bots = os.listdir(bots_dir)
-            text = "📋 *بوتاتك:*\n\n" + "\n".join([f"• `{b}`" for b in bots])
-            await query.edit_message_text(text, parse_mode="Markdown")
+            await query.edit_message_text("\n".join(bots) or "فارغ")
 
-
-# ===== استقبال التوكن =====
-async def receive_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+# ===== التوكن =====
+async def get_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
     token = update.message.text.strip()
 
-    if ":" not in token or len(token) < 20:
-        await update.message.reply_text(
-            "⚠️ التوكن يبدو غلط. تأكد منه وأعد الإرسال."
-        )
-        return ASK_TOKEN
+    if ":" not in token or len(token) < 40:
+        await update.message.reply_text("⚠️ توكن غير صحيح")
+        return STEP_TOKEN
 
-    user_data_store[user_id]["token"] = token
+    store[uid]["token"] = token
+    await update.message.reply_text("💬 أرسل رسالة الترحيب:")
+    return STEP_WELCOME
 
-    await update.message.reply_text(
-        "✅ تم حفظ التوكن!\n\n"
-        "💬 *الخطوة 2: رسالة الترحيب*\n\n"
-        "أرسل الرسالة اللي تظهر للمستخدم لما يكتب /start في بوتك:",
-        parse_mode="Markdown"
-    )
-    return ASK_WELCOME
-
-
-# ===== استقبال رسالة الترحيب =====
-async def receive_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user_data_store[user_id]["welcome"] = update.message.text.strip()
+# ===== الترحيب =====
+async def get_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    store[uid]["welcome"] = update.message.text.strip()
 
     await update.message.reply_text(
-        "✅ تم!\n\n"
-        "⚙️ *الخطوة 3: الأوامر المخصصة*\n\n"
-        "تريد تضيف أوامر مخصصة لبوتك؟\n"
-        "مثال: /price يرد بـ 'السعر 100 ريال'",
-        reply_markup=yes_no_keyboard()
+        "⚙️ هل تريد أوامر مخصصة؟",
+        reply_markup=yes_no()
     )
-    return ASK_COMMANDS_CHOICE
+    return STEP_CMD_CHOICE
 
+# ===== الأوامر =====
+async def cmd_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
 
-# ===== اختيار إضافة أوامر =====
-async def commands_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "yes":
-        await query.edit_message_text(
-            "📝 *اسم الأمر*\n\nأرسل اسم الأمر بدون / مثل: `price` أو `info`",
-            parse_mode="Markdown"
-        )
-        return ASK_COMMAND_NAME
+    if q.data == "yes":
+        await q.edit_message_text("أرسل اسم الأمر بدون /")
+        return STEP_CMD_NAME
     else:
-        await query.edit_message_text(
-            "💬 *الخطوة 4: الردود التلقائية*\n\n"
-            "تريد تضيف ردود تلقائية على كلمات معينة؟\n"
-            "مثال: لو قال 'مرحبا' يرد البوت بـ 'أهلاً!'",
-            reply_markup=yes_no_keyboard()
-        )
-        return ASK_AUTO_REPLY_CHOICE
+        return await auto_choice(update, context)
 
-
-# ===== استقبال اسم الأمر =====
-async def receive_command_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+async def get_cmd_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cmd = update.message.text.strip().replace("/", "").lower()
-    context.user_data["current_cmd"] = cmd
+    context.user_data["cmd"] = cmd
+    await update.message.reply_text("أرسل الرد:")
+    return STEP_CMD_REPLY
 
-    await update.message.reply_text(
-        f"✅ الأمر: `/{cmd}`\n\nأرسل الرد اللي يظهر لما يكتب المستخدم هذا الأمر:",
-        parse_mode="Markdown"
-    )
-    return ASK_COMMAND_REPLY
+async def get_cmd_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    cmd = context.user_data["cmd"]
 
+    store[uid]["commands"][cmd] = update.message.text.strip()
 
-# ===== استقبال رد الأمر =====
-async def receive_command_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    cmd = context.user_data.get("current_cmd")
-    reply = update.message.text.strip()
-    user_data_store[user_id]["commands"][cmd] = reply
+    await update.message.reply_text("هل تريد أمر آخر؟", reply_markup=yes_no())
+    return STEP_CMD_MORE
 
-    await update.message.reply_text(
-        f"✅ تم حفظ الأمر `/{cmd}`!\n\nتريد تضيف أمر آخر؟",
-        parse_mode="Markdown",
-        reply_markup=yes_no_keyboard()
-    )
-    return ASK_MORE_COMMANDS
+async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
 
-
-# ===== المزيد من الأوامر =====
-async def more_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "yes":
-        await query.edit_message_text(
-            "📝 أرسل اسم الأمر الجديد:",
-        )
-        return ASK_COMMAND_NAME
+    if q.data == "yes":
+        await q.edit_message_text("أرسل اسم الأمر:")
+        return STEP_CMD_NAME
     else:
-        await query.edit_message_text(
-            "💬 *الخطوة 4: الردود التلقائية*\n\n"
-            "تريد تضيف ردود تلقائية على كلمات معينة؟",
-            parse_mode="Markdown",
-            reply_markup=yes_no_keyboard()
-        )
-        return ASK_AUTO_REPLY_CHOICE
+        return await auto_choice(update, context)
 
+# ===== الردود التلقائية =====
+async def auto_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
 
-# ===== اختيار ردود تلقائية =====
-async def auto_reply_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "yes":
-        await query.edit_message_text(
-            "🔍 أرسل الكلمة أو الجملة اللي تريد البوت يكشفها:\n"
-            "مثال: `مرحبا`",
-            parse_mode="Markdown"
-        )
-        return ASK_AUTO_KEYWORD
+    if q.data == "yes":
+        await q.edit_message_text("أرسل الكلمة:")
+        return STEP_AUTO_KEYWORD
     else:
-        await query.edit_message_text(
-            "⏰ *الخطوة 5: جدولة الرسائل*\n\n"
-            "تريد البوت يرسل رسائل تلقائية بشكل دوري؟",
-            reply_markup=yes_no_keyboard()
-        )
-        return ASK_SCHEDULE_CHOICE
+        return await schedule_choice(update, context)
 
+async def get_auto_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["keyword"] = update.message.text.lower().strip()
+    await update.message.reply_text("أرسل الرد:")
+    return STEP_AUTO_REPLY
 
-# ===== استقبال الكلمة المفتاحية =====
-async def receive_auto_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["current_keyword"] = update.message.text.strip().lower()
-    await update.message.reply_text("✅ الكلمة المفتاحية محفوظة!\n\nأرسل الرد على هذه الكلمة:")
-    return ASK_AUTO_RESPONSE
+async def get_auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    kw = context.user_data["keyword"]
 
+    store[uid]["auto_replies"][kw] = update.message.text.strip()
 
-# ===== استقبال الرد التلقائي =====
-async def receive_auto_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    keyword = context.user_data.get("current_keyword")
-    response = update.message.text.strip()
-    user_data_store[user_id]["auto_replies"][keyword] = response
+    await update.message.reply_text("هل تضيف كلمة أخرى؟", reply_markup=yes_no())
+    return STEP_AUTO_MORE
 
-    await update.message.reply_text(
-        f"✅ تم! لما يقول أحد `{keyword}` سيرد البوت تلقائياً.\n\nتريد تضيف كلمة أخرى؟",
-        reply_markup=yes_no_keyboard()
-    )
-    return ASK_MORE_AUTO
+async def auto_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
 
-
-# ===== المزيد من الردود التلقائية =====
-async def more_auto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "yes":
-        await query.edit_message_text("🔍 أرسل الكلمة المفتاحية الجديدة:")
-        return ASK_AUTO_KEYWORD
+    if q.data == "yes":
+        await q.edit_message_text("أرسل الكلمة:")
+        return STEP_AUTO_KEYWORD
     else:
-        await query.edit_message_text(
-            "⏰ *الخطوة 5: جدولة الرسائل*\n\n"
-            "تريد البوت يرسل رسائل تلقائية بشكل دوري لقناة أو مجموعة؟",
-            parse_mode="Markdown",
-            reply_markup=yes_no_keyboard()
-        )
-        return ASK_SCHEDULE_CHOICE
+        return await schedule_choice(update, context)
 
-
-# ===== اختيار الجدولة =====
+# ===== الجدولة =====
 async def schedule_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    q = update.callback_query
+    await q.answer()
 
-    if query.data == "yes":
-        await query.edit_message_text(
-            "📣 أرسل Chat ID للقناة أو المجموعة:\n\n"
-            "للحصول عليه: أضف @userinfobot للمجموعة أو القناة وسيعطيك الـ ID"
-        )
-        return ASK_SCHEDULE_CHAT_ID
+    if q.data == "yes":
+        await q.edit_message_text("أرسل Chat ID:")
+        return STEP_SCHEDULE_CHAT
     else:
         return await show_summary(update, context)
 
+async def get_schedule_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["chat_id"] = update.message.text.strip()
+    await update.message.reply_text("أرسل الرسالة:")
+    return STEP_SCHEDULE_MSG
 
-# ===== استقبال Chat ID =====
-async def receive_schedule_chat_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["schedule_chat_id"] = update.message.text.strip()
-    await update.message.reply_text("✅ تم!\n\nأرسل نص الرسالة الدورية:")
-    return ASK_SCHEDULE_MESSAGE
+async def get_schedule_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["sch_msg"] = update.message.text.strip()
+    await update.message.reply_text("كل كم دقيقة؟")
+    return STEP_SCHEDULE_INTERVAL
 
+async def get_schedule_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
 
-# ===== استقبال نص الرسالة الدورية =====
-async def receive_schedule_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["schedule_message"] = update.message.text.strip()
-    await update.message.reply_text(
-        "⏱ كل كم دقيقة تريد إرسال الرسالة؟\n"
-        "أرسل رقم فقط (مثال: 60 لكل ساعة):"
-    )
-    return ASK_SCHEDULE_INTERVAL
-
-
-# ===== استقبال الفترة الزمنية =====
-async def receive_schedule_interval(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
     try:
         interval = int(update.message.text.strip())
-        user_data_store[user_id]["schedule"].append({
-            "chat_id": context.user_data["schedule_chat_id"],
-            "message": context.user_data["schedule_message"],
-            "interval_minutes": interval
+        if interval <= 0:
+            raise ValueError
+
+        store[uid]["schedule"].append({
+            "chat_id": context.user_data["chat_id"],
+            "message": context.user_data["sch_msg"],
+            "interval": interval
         })
-        await update.message.reply_text(f"✅ تم ضبط الجدولة كل {interval} دقيقة!")
-    except ValueError:
-        await update.message.reply_text("⚠️ أرسل رقم صحيح فقط.")
-        return ASK_SCHEDULE_INTERVAL
+
+        await update.message.reply_text("تم الحفظ")
+
+    except:
+        await update.message.reply_text("رقم غير صحيح")
+        return STEP_SCHEDULE_INTERVAL
 
     return await show_summary(update, context)
 
-
-# ===== عرض الملخص =====
+# ===== الملخص =====
 async def show_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    data = user_data_store[user_id]
+    uid = update.effective_user.id
+    d = store[uid]
 
-    cmds_text = "\n".join([f"  • /{k} ← {v}" for k, v in data["commands"].items()]) or "  لا يوجد"
-    auto_text = "\n".join([f"  • '{k}' ← {v}" for k, v in data["auto_replies"].items()]) or "  لا يوجد"
-    schedule_text = "\n".join([f"  • كل {s['interval_minutes']} دقيقة في {s['chat_id']}" for s in data["schedule"]]) or "  لا يوجد"
+    text = f"""
+📋 الملخص:
 
-    summary = (
-        "📋 *ملخص البوت الجديد:*\n\n"
-        f"🔑 التوكن: `{data['token'][:10]}...`\n"
-        f"👋 رسالة الترحيب: {data['welcome'][:50]}\n\n"
-        f"⚙️ الأوامر:\n{cmds_text}\n\n"
-        f"🤖 الردود التلقائية:\n{auto_text}\n\n"
-        f"⏰ الجدولة:\n{schedule_text}"
-    )
+👋 {d['welcome']}
+⚙️ أوامر: {len(d['commands'])}
+🤖 ردود: {len(d['auto_replies'])}
+⏰ جدولة: {len(d['schedule'])}
+"""
 
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🚀 صنع البوت!", callback_data="create_bot")],
-        [InlineKeyboardButton("🔄 ابدأ من جديد", callback_data="new_bot")]
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚀 إنشاء", callback_data="create")]
     ])
 
     if update.callback_query:
-        await update.callback_query.edit_message_text(summary, parse_mode="Markdown", reply_markup=keyboard)
+        await update.callback_query.edit_message_text(text, reply_markup=kb)
     else:
-        await update.message.reply_text(summary, parse_mode="Markdown", reply_markup=keyboard)
+        await update.message.reply_text(text, reply_markup=kb)
 
-    return CONFIRM
-
+    return STEP_CONFIRM
 
 # ===== إنشاء البوت =====
 async def create_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    data = user_data_store[user_id]
+    q = update.callback_query
+    await q.answer()
 
-    await query.edit_message_text("⚙️ جاري بناء البوت...")
-
-    bot_code = generate_bot_code(data)
+    uid = q.from_user.id
+    data = store[uid]
 
     os.makedirs("bots", exist_ok=True)
-    bot_token_short = data["token"].split(":")[0]
-    filename = f"bots/bot_{bot_token_short}.py"
 
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(bot_code)
+    code = build_bot_code(data)
+    path = f"bots/bot_{uid}.py"
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(code)
 
     subprocess.Popen(
-        [sys.executable, filename],
+        [sys.executable, path],
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
+        stderr=subprocess.DEVNULL,
+        start_new_session=True
     )
 
-    await query.edit_message_text(
-        f"🎉 *تم صنع بوتك بنجاح!*\n\n"
-        f"✅ البوت شغّال الآن في الخلفية\n"
-        f"📁 الملف: `{filename}`\n\n"
-        f"اذهب لبوتك على Telegram وجرّبه! 🚀",
-        parse_mode="Markdown",
-        reply_markup=get_main_keyboard()
-    )
+    await q.edit_message_text("✅ تم تشغيل البوت")
     return ConversationHandler.END
 
+# ===== بناء كود البوت =====
+def build_bot_code(d):
+    token = d["token"]
+    welcome = d["welcome"].replace('"', '\\"')
+    auto = json.dumps(d["auto_replies"], ensure_ascii=False)
 
-# ===== توليد كود البوت الجديد =====
-def generate_bot_code(data: dict) -> str:
-    token = data["token"]
-    welcome = data["welcome"].replace('"', '\\"')
-    commands = data["commands"]
-    auto_replies = data["auto_replies"]
-    schedule = data["schedule"]
-
-    command_handlers_code = ""
-    command_register_code = ""
-    for cmd, reply in commands.items():
-        reply_escaped = reply.replace('"', '\\"')
-        command_handlers_code += f'''
-async def cmd_{cmd}(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("{reply_escaped}")
-'''
-        command_register_code += f'    app.add_handler(CommandHandler("{cmd}", cmd_{cmd}))\n'
-
-    auto_replies_json = json.dumps(auto_replies, ensure_ascii=False)
-
-    schedule_code = ""
-    for s in schedule:
-        msg = s["message"].replace('"', '\\"')
-        schedule_code += f'''
-    context.job_queue.run_repeating(
-        lambda ctx: ctx.bot.send_message(chat_id="{s["chat_id"]}", text="{msg}"),
-        interval={s["interval_minutes"] * 60},
-        first=10
-    )
-'''
-
-    code = f'''import logging
+    return f'''
+import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-logging.basicConfig(level=logging.INFO)
-
 TOKEN = "{token}"
-AUTO_REPLIES = {auto_replies_json}
+AUTO = {auto}
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update, context):
     await update.message.reply_text("{welcome}")
 
-{command_handlers_code}
-
-async def auto_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def auto(update, context):
+    if not update.message:
+        return
     text = update.message.text.lower()
-    for keyword, response in AUTO_REPLIES.items():
-        if keyword in text:
-            await update.message.reply_text(response)
-            return
+    for k, v in AUTO.items():
+        if text == k:
+            await update.message.reply_text(v)
 
-async def main():
-    from http.server import HTTPServer, BaseHTTPRequestHandler
-    import threading, os
+app = Application.builder().token(TOKEN).build()
 
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"Bot is running")
-        def log_message(self, *args): pass
+app.add_handler(CommandHandler("start", start))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto))
 
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-{command_register_code}
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_reply))
-{schedule_code}
-    await app.run_polling()
-
-if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+print("Bot running...")
+app.run_polling()
 '''
-    return code
 
-
-# ===== الإلغاء =====
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ تم الإلغاء.", reply_markup=get_main_keyboard())
-    return ConversationHandler.END
-
-
-# ===== التشغيل الرئيسي ===== (الإصلاح هنا)
+# ===== التشغيل =====
 def main():
-    from http.server import HTTPServer, BaseHTTPRequestHandler
-    import threading
+    token = os.environ.get("BOT_TOKEN")
+    if not token:
+        print("BOT_TOKEN missing")
+        return
 
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"Bot Factory Running")
-        def log_message(self, *args): pass
-
-    # ✅ الإصلاح: تشغيل السيرفر مباشرة بدون دالة داخلية
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    print(f"✅ HTTP server running on port {port}")
-
-    TOKEN = "8297443710:AAEtkl_-iqII7n88yRQcJ1sfFKVt4oT_iD0"
-
-    app = Application.builder().token(TOKEN).build()
+    app = Application.builder().token(token).build()
 
     conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_handler, pattern="^new_bot$")],
+        entry_points=[CallbackQueryHandler(menu_handler, pattern="new_bot")],
         states={
-            ASK_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_token)],
-            ASK_WELCOME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_welcome)],
-            ASK_COMMANDS_CHOICE: [CallbackQueryHandler(commands_choice)],
-            ASK_COMMAND_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_command_name)],
-            ASK_COMMAND_REPLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_command_reply)],
-            ASK_MORE_COMMANDS: [CallbackQueryHandler(more_commands)],
-            ASK_AUTO_REPLY_CHOICE: [CallbackQueryHandler(auto_reply_choice)],
-            ASK_AUTO_KEYWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_auto_keyword)],
-            ASK_AUTO_RESPONSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_auto_response)],
-            ASK_MORE_AUTO: [CallbackQueryHandler(more_auto)],
-            ASK_SCHEDULE_CHOICE: [CallbackQueryHandler(schedule_choice)],
-            ASK_SCHEDULE_CHAT_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_schedule_chat_id)],
-            ASK_SCHEDULE_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_schedule_message)],
-            ASK_SCHEDULE_INTERVAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_schedule_interval)],
-            CONFIRM: [CallbackQueryHandler(create_bot, pattern="^create_bot$")],
+            STEP_TOKEN: [MessageHandler(filters.TEXT, get_token)],
+            STEP_WELCOME: [MessageHandler(filters.TEXT, get_welcome)],
+            STEP_CMD_CHOICE: [CallbackQueryHandler(cmd_choice)],
+            STEP_CMD_NAME: [MessageHandler(filters.TEXT, get_cmd_name)],
+            STEP_CMD_REPLY: [MessageHandler(filters.TEXT, get_cmd_reply)],
+            STEP_CMD_MORE: [CallbackQueryHandler(cmd_more)],
+            STEP_AUTO_KEYWORD: [MessageHandler(filters.TEXT, get_auto_keyword)],
+            STEP_AUTO_REPLY: [MessageHandler(filters.TEXT, get_auto_reply)],
+            STEP_AUTO_MORE: [CallbackQueryHandler(auto_more)],
+            STEP_SCHEDULE_CHAT: [MessageHandler(filters.TEXT, get_schedule_chat)],
+            STEP_SCHEDULE_MSG: [MessageHandler(filters.TEXT, get_schedule_msg)],
+            STEP_SCHEDULE_INTERVAL: [MessageHandler(filters.TEXT, get_schedule_interval)],
+            STEP_CONFIRM: [CallbackQueryHandler(create_bot, pattern="create")],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
-        per_message=False
+        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)]
     )
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(conv)
 
-    print("🚀 Bot Factory is running...")
-    import asyncio
-    asyncio.run(app.run_polling())
-
+    print("Running...")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
