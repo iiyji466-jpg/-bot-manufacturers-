@@ -490,7 +490,7 @@ def main():
 
     threading.Thread(target=run_server, daemon=True).start()
 
-    TOKEN = "8297443710:AAHDZseyv5jwjrSzjc1AEvAkXM1nLPAfRrQ"
+    TOKEN = "8297443710:AAGdxFDGNfy8xQACikdz60E075SibSgZvcI"
 
     app = Application.builder().token(TOKEN).build()
 
