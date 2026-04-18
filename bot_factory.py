@@ -490,7 +490,7 @@ def main():
 
     threading.Thread(target=run_server, daemon=True).start()
 
-    TOKEN = os.environ.get("BOT_TOKEN", "YOUR_FACTORY_BOT_TOKEN_HERE")
+    TOKEN = "8297443710:AAHDZseyv5jwjrSzjc1AEvAkXM1nLPAfRrQ"
 
     app = Application.builder().token(TOKEN).build()
 
