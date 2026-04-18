@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: bot-factory
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot_factory.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
