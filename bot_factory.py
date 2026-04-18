@@ -350,10 +350,8 @@ async def create_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text("⚙️ جاري بناء البوت...")
 
-    # توليد الكود
     bot_code = generate_bot_code(data)
 
-    # حفظ الكود
     os.makedirs("bots", exist_ok=True)
     bot_token_short = data["token"].split(":")[0]
     filename = f"bots/bot_{bot_token_short}.py"
@@ -361,7 +359,6 @@ async def create_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with open(filename, "w", encoding="utf-8") as f:
         f.write(bot_code)
 
-    # تشغيل البوت في الخلفية
     subprocess.Popen(
         [sys.executable, filename],
         stdout=subprocess.DEVNULL,
@@ -387,7 +384,6 @@ def generate_bot_code(data: dict) -> str:
     auto_replies = data["auto_replies"]
     schedule = data["schedule"]
 
-    # بناء handlers الأوامر
     command_handlers_code = ""
     command_register_code = ""
     for cmd, reply in commands.items():
@@ -398,10 +394,8 @@ async def cmd_{cmd}(update: Update, context: ContextTypes.DEFAULT_TYPE):
 '''
         command_register_code += f'    app.add_handler(CommandHandler("{cmd}", cmd_{cmd}))\n'
 
-    # بناء الردود التلقائية
     auto_replies_json = json.dumps(auto_replies, ensure_ascii=False)
 
-    # بناء jobs الجدولة
     schedule_code = ""
     for s in schedule:
         msg = s["message"].replace('"', '\\"')
@@ -445,11 +439,9 @@ async def main():
             self.wfile.write(b"Bot is running")
         def log_message(self, *args): pass
 
-    def run_server():
-        port = int(os.environ.get("PORT", 8080))
-        HTTPServer(("0.0.0.0", port), Handler).serve_forever()
-
-    threading.Thread(target=run_server, daemon=True).start()
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
 
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -471,9 +463,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ===== التشغيل الرئيسي =====
+# ===== التشغيل الرئيسي ===== (الإصلاح هنا)
 def main():
-    import os
     from http.server import HTTPServer, BaseHTTPRequestHandler
     import threading
 
@@ -484,11 +475,11 @@ def main():
             self.wfile.write(b"Bot Factory Running")
         def log_message(self, *args): pass
 
-    def run_server():
-        port = int(os.environ.get("PORT", 8080))
-        HTTPServer(("0.0.0.0", port), Handler).serve_forever()
-
-    threading.Thread(target=run_server, daemon=True).start()
+    # ✅ الإصلاح: تشغيل السيرفر مباشرة بدون دالة داخلية
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    print(f"✅ HTTP server running on port {port}")
 
     TOKEN = "8297443710:AAGdxFDGNfy8xQACikdz60E075SibSgZvcI"
 
