@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# تحديث pip أولاً
+# تحديث pip وتثبيت المتطلبات الأساسية فقط
 RUN pip install --upgrade pip
 
 COPY requirements.txt .
