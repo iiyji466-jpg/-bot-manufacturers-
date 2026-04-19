@@ -1,4 +1,4 @@
-# bot_factory.py - الإصدار النهائي المتوافق مع Docker و Render
+# bot_factory.py - الإصدار النهائي المتكامل (قوالب + حزمة ZIP + إشارات إنهاء نظيفة)
 import os
 import json
 import logging
@@ -8,9 +8,10 @@ import subprocess
 import sys
 import asyncio
 import signal
+import zipfile
+import io
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ===== التحقق من إصدار المكتبة =====
 import telegram
 print(f"✅ إصدار python-telegram-bot: {telegram.__version__}")
 
@@ -27,19 +28,67 @@ logging.basicConfig(
 
 # ===== مراحل المحادثة =====
 (
-    STEP_TOKEN, STEP_WELCOME, STEP_CMD_CHOICE, STEP_CMD_NAME,
-    STEP_CMD_REPLY, STEP_CMD_MORE, STEP_AUTO_CHOICE, STEP_AUTO_KEYWORD,
-    STEP_AUTO_REPLY, STEP_AUTO_MORE, STEP_SCHEDULE_CHOICE, STEP_SCHEDULE_CHAT,
-    STEP_SCHEDULE_MSG, STEP_SCHEDULE_INTERVAL, STEP_CONFIRM,
-) = range(15)
+    STEP_TEMPLATE,           # اختيار نوع القالب
+    STEP_TOKEN,
+    STEP_WELCOME,
+    STEP_CMD_CHOICE,
+    STEP_CMD_NAME,
+    STEP_CMD_REPLY,
+    STEP_CMD_MORE,
+    STEP_AUTO_CHOICE,
+    STEP_AUTO_KEYWORD,
+    STEP_AUTO_REPLY,
+    STEP_AUTO_MORE,
+    STEP_SCHEDULE_CHOICE,
+    STEP_SCHEDULE_CHAT,
+    STEP_SCHEDULE_MSG,
+    STEP_SCHEDULE_INTERVAL,
+    STEP_API_KEYS,           # طلب مفاتيح API
+    STEP_CONFIRM,
+) = range(18)
 
 store = {}
 
+# ===== تعريف القوالب =====
+TEMPLATES = {
+    "simple": {
+        "name": "🤖 بوت أوامر وردود بسيط",
+        "description": "أوامر مخصصة، ردود تلقائية، وجدولة.",
+        "needs_api": False,
+        "api_keys": []
+    },
+    "downloader": {
+        "name": "⬇️ بوت تحميل (YouTube, Instagram)",
+        "description": "أرسل رابطًا وسيقوم البوت بتحميل الفيديو.",
+        "needs_api": False,
+        "api_keys": []
+    },
+    "translator": {
+        "name": "🌐 بوت ترجمة فورية",
+        "description": "يكتب المستخدم نصًا ويترجمه إلى العربية أو الإنجليزية.",
+        "needs_api": False,   # googletrans مجاني بدون API
+        "api_keys": []
+    },
+    "chatgpt": {
+        "name": "🧠 بوت محادثة ذكي (ChatGPT)",
+        "description": "يتحدث مع المستخدم باستخدام OpenAI API.",
+        "needs_api": True,
+        "api_keys": ["OPENAI_API_KEY"]
+    }
+}
+
+# ===== لوحات المفاتيح =====
 def main_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🤖 صنع بوت جديد", callback_data="new_bot")],
         [InlineKeyboardButton("📋 بوتاتي", callback_data="my_bots")],
     ])
+
+def template_menu():
+    keyboard = []
+    for key, data in TEMPLATES.items():
+        keyboard.append([InlineKeyboardButton(data["name"], callback_data=f"tpl_{key}")])
+    return InlineKeyboardMarkup(keyboard)
 
 def yes_no():
     return InlineKeyboardMarkup([
@@ -47,10 +96,11 @@ def yes_no():
          InlineKeyboardButton("❌ لا", callback_data="no")]
     ])
 
+# ===== دوال المحادثة الأساسية =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *أهلاً! أنا بوت صانع البوتات*\n\n"
-        "بدون كود، أصنع لك بوت Telegram خاص بك!\n\n"
+        "بدون كود، أصنع لك بوت Telegram احترافي!\n\n"
         "اختر من القائمة:",
         parse_mode="Markdown",
         reply_markup=main_menu()
@@ -75,16 +125,46 @@ async def new_bot_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     uid = query.from_user.id
     store[uid] = {
+        "template": "simple",  # افتراضي
         "token": "", "welcome": "", "commands": {},
-        "auto_replies": {}, "schedule": []
+        "auto_replies": {}, "schedule": [], "api_keys": {}
     }
     await query.edit_message_text(
-        "🔑 *الخطوة 1 من 5: توكن البوت*\n\n"
-        "افتح @BotFather وأنشئ بوتاً جديداً،\n"
-        "ثم أرسل التوكن هنا:\n\n"
-        "مثال: `123456789:ABCdef...`",
-        parse_mode="Markdown"
+        "📌 *اختر نوع البوت الذي تريد صنعه:*\n\n"
+        "كل نوع يأتي بوظائف جاهزة. اختر ما يناسبك:",
+        parse_mode="Markdown",
+        reply_markup=template_menu()
     )
+    return STEP_TEMPLATE
+
+async def choose_template(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    template_key = query.data.replace("tpl_", "")
+    store[uid]["template"] = template_key
+    template = TEMPLATES[template_key]
+
+    # إذا كان القالب يحتاج مفاتيح API
+    if template["needs_api"]:
+        store[uid]["needed_keys"] = template["api_keys"].copy()
+        await query.edit_message_text(
+            f"✅ اخترت: *{template['name']}*\n\n"
+            f"{template['description']}\n\n"
+            f"هذا البوت يحتاج بعض المفاتيح للعمل.\n"
+            f"سأطلب منك لاحقًا: {', '.join(template['api_keys'])}\n\n"
+            "🔑 *الخطوة 1: توكن البوت*\n"
+            "أرسل التوكن الذي حصلت عليه من @BotFather:",
+            parse_mode="Markdown"
+        )
+    else:
+        await query.edit_message_text(
+            f"✅ اخترت: *{template['name']}*\n\n"
+            f"{template['description']}\n\n"
+            "🔑 *الخطوة 1: توكن البوت*\n"
+            "أرسل التوكن الذي حصلت عليه من @BotFather:",
+            parse_mode="Markdown"
+        )
     return STEP_TOKEN
 
 async def get_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -97,9 +177,23 @@ async def get_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from telegram import Bot
         me = await Bot(token=token).get_me()
         store[uid]["token"] = token
+        template = TEMPLATES[store[uid]["template"]]
+
+        # إذا كان القالب يحتاج API keys
+        if template["needs_api"] and store[uid].get("needed_keys"):
+            next_key = store[uid]["needed_keys"][0]
+            await update.message.reply_text(
+                f"✅ التوكن صحيح. اسم البوت: @{me.username}\n\n"
+                f"🔐 *مطلوب مفتاح API:* `{next_key}`\n\n"
+                f"أرسل قيمة `{next_key}` الآن:",
+                parse_mode="Markdown"
+            )
+            return STEP_API_KEYS
+
+        # وإلا ننتقل لرسالة الترحيب
         await update.message.reply_text(
             f"✅ تم! اسم البوت: @{me.username}\n\n"
-            "💬 *الخطوة 2 من 5: رسالة الترحيب*\n\n"
+            "💬 *رسالة الترحيب*\n\n"
             "ما الرسالة التي تظهر عند كتابة /start في بوتك؟",
             parse_mode="Markdown"
         )
@@ -108,19 +202,48 @@ async def get_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ التوكن غير صالح: {e}\nأرسل توكن صحيح:")
         return STEP_TOKEN
 
+async def get_api_keys(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    value = update.message.text.strip()
+
+    current_key = store[uid]["needed_keys"].pop(0)
+    store[uid]["api_keys"][current_key] = value
+
+    if store[uid]["needed_keys"]:
+        next_key = store[uid]["needed_keys"][0]
+        await update.message.reply_text(
+            f"✅ تم حفظ `{current_key}`\n\n"
+            f"🔐 *المفتاح التالي:* `{next_key}`\n"
+            f"أرسل القيمة:",
+            parse_mode="Markdown"
+        )
+        return STEP_API_KEYS
+    else:
+        await update.message.reply_text(
+            "✅ تم حفظ جميع المفاتيح!\n\n"
+            "💬 *رسالة الترحيب*\n\n"
+            "ما الرسالة التي تظهر عند كتابة /start في بوتك؟",
+            parse_mode="Markdown"
+        )
+        return STEP_WELCOME
+
 async def get_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     store[uid]["welcome"] = update.message.text.strip()
-    await update.message.reply_text(
-        "✅ تم!\n\n"
-        "⚙️ *الخطوة 3 من 5: الأوامر المخصصة*\n\n"
-        "هل تريد إضافة أوامر؟\n"
-        "مثال: /price يرد بـ 'السعر 50 ريال'",
-        parse_mode="Markdown",
-        reply_markup=yes_no()
-    )
-    return STEP_CMD_CHOICE
 
+    if store[uid]["template"] == "simple":
+        await update.message.reply_text(
+            "✅ تم!\n\n"
+            "⚙️ *الأوامر المخصصة*\n\n"
+            "هل تريد إضافة أوامر؟",
+            parse_mode="Markdown",
+            reply_markup=yes_no()
+        )
+        return STEP_CMD_CHOICE
+    else:
+        return await show_summary(update, context)
+
+# ===== دوال الأوامر المخصصة =====
 async def cmd_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -129,7 +252,7 @@ async def cmd_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return STEP_CMD_NAME
     else:
         await query.edit_message_text(
-            "🤖 *الخطوة 4 من 5: الردود التلقائية*\n\n"
+            "🤖 *الردود التلقائية*\n\n"
             "هل تريد إضافة ردود تلقائية على كلمات معينة؟",
             parse_mode="Markdown",
             reply_markup=yes_no()
@@ -164,13 +287,14 @@ async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return STEP_CMD_NAME
     else:
         await query.edit_message_text(
-            "🤖 *الخطوة 4 من 5: الردود التلقائية*\n\n"
+            "🤖 *الردود التلقائية*\n\n"
             "هل تريد إضافة ردود تلقائية على كلمات معينة؟",
             parse_mode="Markdown",
             reply_markup=yes_no()
         )
         return STEP_AUTO_CHOICE
 
+# ===== دوال الردود التلقائية =====
 async def auto_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -179,7 +303,7 @@ async def auto_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return STEP_AUTO_KEYWORD
     else:
         await query.edit_message_text(
-            "⏰ *الخطوة 5 من 5: جدولة الرسائل*\n\n"
+            "⏰ *جدولة الرسائل*\n\n"
             "هل تريد إرسال رسائل دورية تلقائية؟",
             parse_mode="Markdown",
             reply_markup=yes_no()
@@ -214,13 +338,14 @@ async def auto_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return STEP_AUTO_KEYWORD
     else:
         await query.edit_message_text(
-            "⏰ *الخطوة 5 من 5: جدولة الرسائل*\n\n"
+            "⏰ *جدولة الرسائل*\n\n"
             "هل تريد إرسال رسائل دورية تلقائية؟",
             parse_mode="Markdown",
             reply_markup=yes_no()
         )
         return STEP_SCHEDULE_CHOICE
 
+# ===== دوال الجدولة =====
 async def schedule_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -271,6 +396,7 @@ async def get_schedule_interval(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("⚠️ أرسل رقم صحيح أكبر من صفر.")
         return STEP_SCHEDULE_INTERVAL
 
+# ===== عرض الملخص =====
 async def show_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         query = update.callback_query
@@ -286,17 +412,22 @@ async def show_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await sender.reply_text("⚠️ انتهت الجلسة. ابدأ من جديد بالضغط على /start")
         return ConversationHandler.END
 
-    cmds = "\n".join([f"  • /{k} ← {v}" for k, v in d["commands"].items()]) or "  لا يوجد"
-    autos = "\n".join([f"  • '{k}' ← {v}" for k, v in d["auto_replies"].items()]) or "  لا يوجد"
-    schs = "\n".join([f"  • كل {s['interval']} دقيقة ← {s['message'][:20]}..." for s in d["schedule"]]) or "  لا يوجد"
+    template_name = TEMPLATES[d["template"]]["name"]
 
     text = (
-        "📋 *ملخص البوت:*\n\n"
-        f"👋 الترحيب: {d['welcome'][:40]}\n\n"
-        f"⚙️ الأوامر:\n{cmds}\n\n"
-        f"🤖 الردود التلقائية:\n{autos}\n\n"
-        f"⏰ الجدولة:\n{schs}"
+        f"📋 *ملخص البوت:*\n\n"
+        f"📌 النوع: {template_name}\n"
+        f"👋 الترحيب: {d['welcome'][:40]}\n"
     )
+
+    if d["template"] == "simple":
+        cmds = "\n".join([f"  • /{k} ← {v}" for k, v in d["commands"].items()]) or "  لا يوجد"
+        autos = "\n".join([f"  • '{k}' ← {v}" for k, v in d["auto_replies"].items()]) or "  لا يوجد"
+        schs = "\n".join([f"  • كل {s['interval']} دقيقة" for s in d["schedule"]]) or "  لا يوجد"
+        text += f"\n⚙️ الأوامر:\n{cmds}\n\n🤖 الردود التلقائية:\n{autos}\n\n⏰ الجدولة:\n{schs}"
+    else:
+        if d["api_keys"]:
+            text += f"\n🔑 مفاتيح API: {', '.join(d['api_keys'].keys())}"
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🚀 أنشئ البوت!", callback_data="create")],
@@ -310,6 +441,7 @@ async def show_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return STEP_CONFIRM
 
+# ===== إنشاء حزمة البوت وإرسالها =====
 async def create_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -319,45 +451,102 @@ async def create_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("⚠️ بيانات غير موجودة. ابدأ من جديد.")
         return ConversationHandler.END
 
-    await query.edit_message_text("⚙️ جاري بناء البوت...")
+    await query.edit_message_text("⚙️ جاري بناء حزمة البوت الخاصة بك...")
     try:
-        code = build_bot_code(d)
+        bot_package_data = build_bot_code(d)
+        if not bot_package_data:
+            raise ValueError("فشل بناء البوت: نوع القالب غير معروف.")
     except Exception as e:
         await query.edit_message_text(f"❌ خطأ في بناء الكود: {e}")
         return ConversationHandler.END
 
-    base_dir = os.getcwd()
-    bots_dir = os.path.join(base_dir, "bots")
-    os.makedirs(bots_dir, exist_ok=True)
+    await package_and_send(update, context, bot_package_data)
 
-    short = d["token"].split(":")[0]
-    filename = os.path.join(bots_dir, f"bot_{short}.py")
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(code)
-
-    try:
-        subprocess.Popen(
-            [sys.executable, filename],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-            cwd=base_dir
-        )
-    except Exception as e:
-        await query.edit_message_text(f"❌ فشل تشغيل البوت: {e}")
-        return ConversationHandler.END
-
-    await query.edit_message_text(
-        "🎉 *تم إنشاء بوتك بنجاح!*\n\n"
-        "✅ البوت يعمل الآن\n"
-        "افتح بوتك على Telegram واكتب /start",
-        parse_mode="Markdown",
+    await context.bot.send_message(
+        chat_id=query.message.chat_id,
+        text="ماذا تريد أن تفعل بعد ذلك؟",
         reply_markup=main_menu()
     )
+
     del store[uid]
     return ConversationHandler.END
 
+# ===== دوال بناء الأكواد والقوالب =====
 def build_bot_code(d):
+    template = d["template"]
+    token = d["token"]
+    welcome = json.dumps(d["welcome"])
+
+    if template == "simple":
+        bot_code = build_simple_bot(d)
+        requirements = "python-telegram-bot==20.7\n"
+        readme = generate_readme(d, "simple")
+    elif template == "downloader":
+        bot_code = build_downloader_bot(d)
+        requirements = "python-telegram-bot==20.7\nyt-dlp\n"
+        readme = generate_readme(d, "downloader")
+    elif template == "translator":
+        bot_code = build_translator_bot(d)
+        requirements = "python-telegram-bot==20.7\ngoogletrans==4.0.0rc1\n"
+        readme = generate_readme(d, "translator")
+    elif template == "chatgpt":
+        bot_code = build_chatgpt_bot(d)
+        requirements = "python-telegram-bot==20.7\nopenai\n"
+        readme = generate_readme(d, "chatgpt")
+    else:
+        return None
+
+    return {
+        "bot_code": bot_code,
+        "requirements": requirements,
+        "readme": readme
+    }
+
+def generate_readme(d, template_type):
+    base = f"""# 🤖 بوت تيليجرام الخاص بك جاهز!
+
+## 📦 محتويات الحزمة
+- `bot.py` : الكود المصدري للبوت.
+- `requirements.txt` : المكتبات المطلوبة.
+- `README.md` : هذا الملف.
+
+## 🚀 كيفية تشغيل البوت على Render (مجاناً 24/7)
+
+1. فك ضغط الملف الذي تلقيته.
+2. اذهب إلى [Render.com](https://render.com) وأنشئ حساباً.
+3. من لوحة التحكم، اضغط **New +** → **Web Service**.
+4. اختر **Upload your own code** وارفع المجلد الذي يحتوي على الملفات.
+   - أو ارفع الملفات إلى GitHub واختر **Deploy from GitHub**.
+5. في إعدادات الخدمة:
+   - **Name**: أي اسم (مثلاً `my-awesome-bot`).
+   - **Environment**: `Python 3`.
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `python bot.py`
+   - **Environment Variables**: أضف متغير اسمه `BOT_TOKEN` وقيمته التوكن الخاص بك.
+"""
+    if template_type == "chatgpt":
+        base += f"     - أضف أيضاً `OPENAI_API_KEY` وقيمته: `{d['api_keys'].get('OPENAI_API_KEY', 'YOUR_KEY')}`\n"
+
+    base += """
+6. اختر الخطة **Free** واضغط **Create Web Service**.
+7. انتظر دقيقتين حتى تكتمل عملية النشر (ستظهر علامة "Live").
+
+## ⏰ الحفاظ على البوت مستيقظاً (عدم التوقف)
+
+لأن الخطة المجانية على Render تجعل الخدمة تنام بعد 15 دقيقة من عدم النشاط، استخدم خدمة **UptimeRobot** المجانية:
+- اذهب إلى [UptimeRobot](https://uptimerobot.com/) وأنشئ حساباً.
+- أضف مراقب (Monitor) نوعه **HTTP(s)**.
+- أدخل رابط تطبيقك الذي يظهر في Render (مثل `https://my-awesome-bot.onrender.com`).
+- اضبط الفحص كل **5 دقائق**.
+
+🎉 بهذه الطريقة سيبقى بوتك يعمل 24 ساعة طوال أيام الأسبوع دون توقف!
+
+## ❓ الدعم
+إذا واجهت أي مشكلة، تواصل مع صانع البوت.
+"""
+    return base
+
+def build_simple_bot(d):
     token = d["token"]
     welcome = json.dumps(d["welcome"])
     auto_json = json.dumps(d["auto_replies"], ensure_ascii=False)
@@ -414,6 +603,140 @@ if __name__ == "__main__":
     asyncio.run(main())
 '''
 
+def build_downloader_bot(d):
+    token = d["token"]
+    welcome = json.dumps(d["welcome"])
+    return f'''import os
+import asyncio
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import yt_dlp
+
+TOKEN = "{token}"
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text({welcome})
+
+async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text.strip()
+    await update.message.reply_text("⏳ جاري تحميل الفيديو...")
+    try:
+        ydl_opts = {{
+            'outtmpl': '%(title)s.%(ext)s',
+            'quiet': True,
+            'format': 'best[height<=720]'
+        }}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+        await update.message.reply_video(video=open(filename, 'rb'))
+        os.remove(filename)
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ: {{e}}")
+
+async def main():
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_video))
+    await app.run_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+'''
+
+def build_translator_bot(d):
+    token = d["token"]
+    welcome = json.dumps(d["welcome"])
+    return f'''import asyncio
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from googletrans import Translator
+
+TOKEN = "{token}"
+translator = Translator()
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text({welcome})
+
+async def translate_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    try:
+        detected = translator.detect(text)
+        if detected.lang != 'ar':
+            translated = translator.translate(text, dest='ar')
+        else:
+            translated = translator.translate(text, dest='en')
+        await update.message.reply_text(f"🔤 الترجمة:\\n{{translated.text}}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ: {{e}}")
+
+async def main():
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, translate_text))
+    await app.run_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+'''
+
+def build_chatgpt_bot(d):
+    token = d["token"]
+    welcome = json.dumps(d["welcome"])
+    openai_key = d["api_keys"].get("OPENAI_API_KEY", "")
+    return f'''import asyncio
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import openai
+
+TOKEN = "{token}"
+openai.api_key = "{openai_key}"
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text({welcome})
+
+async def chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_msg = update.message.text
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[{{"role": "user", "content": user_msg}}]
+        )
+        reply = response['choices'][0]['message']['content']
+        await update.message.reply_text(reply)
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطأ: {{e}}")
+
+async def main():
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat))
+    await app.run_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+'''
+
+async def package_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE, bot_data):
+    query = update.callback_query
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED, False) as zip_file:
+        zip_file.writestr('bot.py', bot_data['bot_code'])
+        zip_file.writestr('requirements.txt', bot_data['requirements'])
+        zip_file.writestr('README.md', bot_data['readme'])
+    zip_buffer.seek(0)
+
+    await query.edit_message_text("✅ تم تجهيز بوتك! جاري إرسال الملفات...")
+    await context.bot.send_document(
+        chat_id=query.message.chat_id,
+        document=zip_buffer,
+        filename="my_new_telegram_bot.zip",
+        caption="🎁 **حزمة بوتك الجديد جاهزة!**\n\n"
+                "افتح الملف `README.md` داخل الأرشيف لتتبع خطوات النشر السهلة.\n"
+                "بعد النشر، سيعمل بوتك 24 ساعة دون توقف! 🚀",
+        parse_mode="Markdown"
+    )
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ تم الإلغاء.", reply_markup=main_menu())
     uid = update.effective_user.id
@@ -421,6 +744,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del store[uid]
     return ConversationHandler.END
 
+# ===== خادم HTTP وإدارة الإشارات =====
 def run_web_server():
     class HealthHandler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -446,7 +770,9 @@ async def run_bot():
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(new_bot_entry, pattern="^new_bot$")],
         states={
+            STEP_TEMPLATE: [CallbackQueryHandler(choose_template, pattern="^tpl_")],
             STEP_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_token)],
+            STEP_API_KEYS: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_api_keys)],
             STEP_WELCOME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_welcome)],
             STEP_CMD_CHOICE: [CallbackQueryHandler(cmd_choice)],
             STEP_CMD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_cmd_name)],
@@ -471,12 +797,10 @@ async def run_bot():
 
     print("🚀 Bot Factory يعمل...")
 
-    # تشغيل البوت بشكل متحكم به لاستقبال إشارات الإنهاء
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
 
-    # انتظار إشارة الإيقاف (SIGTERM من Render)
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -488,19 +812,15 @@ async def run_bot():
         try:
             loop.add_signal_handler(sig, signal_handler)
         except NotImplementedError:
-            # على بعض الأنظمة (مثل Windows) قد لا تكون add_signal_handler مدعومة
             pass
 
     await stop_event.wait()
 
-    # إيقاف البوت بشكل آمن
     await app.updater.stop()
     await app.stop()
     await app.shutdown()
     print("✅ تم إيقاف البوت بنجاح")
 
 if __name__ == "__main__":
-    # تشغيل خادم HTTP في thread منفصل لمنع Render من إيقاف الخدمة
     threading.Thread(target=run_web_server, daemon=True).start()
-    # تشغيل البوت مع التعامل الكامل مع الإشارات
     asyncio.run(run_bot())
