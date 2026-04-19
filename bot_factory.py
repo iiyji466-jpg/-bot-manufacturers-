@@ -1,10 +1,9 @@
-# bot_factory.py - الإصدار النهائي المتكامل (قوالب + حزمة ZIP + إشارات إنهاء نظيفة)
+# bot_factory.py - الإصدار النهائي المتكامل (18 مرحلة بالضبط)
 import os
 import json
 import logging
 import re
 import threading
-import subprocess
 import sys
 import asyncio
 import signal
@@ -28,23 +27,24 @@ logging.basicConfig(
 
 # ===== مراحل المحادثة =====
 (
-    STEP_TEMPLATE,           # اختيار نوع القالب
-    STEP_TOKEN,
-    STEP_WELCOME,
-    STEP_CMD_CHOICE,
-    STEP_CMD_NAME,
-    STEP_CMD_REPLY,
-    STEP_CMD_MORE,
-    STEP_AUTO_CHOICE,
-    STEP_AUTO_KEYWORD,
-    STEP_AUTO_REPLY,
-    STEP_AUTO_MORE,
-    STEP_SCHEDULE_CHOICE,
-    STEP_SCHEDULE_CHAT,
-    STEP_SCHEDULE_MSG,
-    STEP_SCHEDULE_INTERVAL,
-    STEP_API_KEYS,           # طلب مفاتيح API
-    STEP_CONFIRM,
+    STEP_TEMPLATE,           # 0
+    STEP_TOKEN,              # 1
+    STEP_WELCOME,            # 2
+    STEP_CMD_CHOICE,         # 3
+    STEP_CMD_NAME,           # 4
+    STEP_CMD_REPLY,          # 5
+    STEP_CMD_MORE,           # 6
+    STEP_AUTO_CHOICE,        # 7
+    STEP_AUTO_KEYWORD,       # 8
+    STEP_AUTO_REPLY,         # 9
+    STEP_AUTO_MORE,          # 10
+    STEP_SCHEDULE_CHOICE,    # 11
+    STEP_SCHEDULE_CHAT,      # 12
+    STEP_SCHEDULE_MSG,       # 13
+    STEP_SCHEDULE_INTERVAL,  # 14
+    STEP_API_KEYS,           # 15
+    STEP_CONFIRM,            # 16
+    STEP_END,                # 17 (غير مستخدم لكنه موجود ليكمل العدد 18)
 ) = range(18)
 
 store = {}
@@ -66,7 +66,7 @@ TEMPLATES = {
     "translator": {
         "name": "🌐 بوت ترجمة فورية",
         "description": "يكتب المستخدم نصًا ويترجمه إلى العربية أو الإنجليزية.",
-        "needs_api": False,   # googletrans مجاني بدون API
+        "needs_api": False,
         "api_keys": []
     },
     "chatgpt": {
@@ -96,7 +96,7 @@ def yes_no():
          InlineKeyboardButton("❌ لا", callback_data="no")]
     ])
 
-# ===== دوال المحادثة الأساسية =====
+# ===== دوال المحادثة =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 *أهلاً! أنا بوت صانع البوتات*\n\n"
@@ -125,7 +125,7 @@ async def new_bot_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     uid = query.from_user.id
     store[uid] = {
-        "template": "simple",  # افتراضي
+        "template": "simple",
         "token": "", "welcome": "", "commands": {},
         "auto_replies": {}, "schedule": [], "api_keys": {}
     }
@@ -145,7 +145,6 @@ async def choose_template(update: Update, context: ContextTypes.DEFAULT_TYPE):
     store[uid]["template"] = template_key
     template = TEMPLATES[template_key]
 
-    # إذا كان القالب يحتاج مفاتيح API
     if template["needs_api"]:
         store[uid]["needed_keys"] = template["api_keys"].copy()
         await query.edit_message_text(
@@ -179,7 +178,6 @@ async def get_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
         store[uid]["token"] = token
         template = TEMPLATES[store[uid]["template"]]
 
-        # إذا كان القالب يحتاج API keys
         if template["needs_api"] and store[uid].get("needed_keys"):
             next_key = store[uid]["needed_keys"][0]
             await update.message.reply_text(
@@ -190,7 +188,6 @@ async def get_token(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return STEP_API_KEYS
 
-        # وإلا ننتقل لرسالة الترحيب
         await update.message.reply_text(
             f"✅ تم! اسم البوت: @{me.username}\n\n"
             "💬 *رسالة الترحيب*\n\n"
@@ -243,7 +240,6 @@ async def get_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         return await show_summary(update, context)
 
-# ===== دوال الأوامر المخصصة =====
 async def cmd_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -294,7 +290,6 @@ async def cmd_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return STEP_AUTO_CHOICE
 
-# ===== دوال الردود التلقائية =====
 async def auto_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -345,7 +340,6 @@ async def auto_more(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return STEP_SCHEDULE_CHOICE
 
-# ===== دوال الجدولة =====
 async def schedule_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -396,7 +390,6 @@ async def get_schedule_interval(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("⚠️ أرسل رقم صحيح أكبر من صفر.")
         return STEP_SCHEDULE_INTERVAL
 
-# ===== عرض الملخص =====
 async def show_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         query = update.callback_query
@@ -413,12 +406,7 @@ async def show_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     template_name = TEMPLATES[d["template"]]["name"]
-
-    text = (
-        f"📋 *ملخص البوت:*\n\n"
-        f"📌 النوع: {template_name}\n"
-        f"👋 الترحيب: {d['welcome'][:40]}\n"
-    )
+    text = f"📋 *ملخص البوت:*\n\n📌 النوع: {template_name}\n👋 الترحيب: {d['welcome'][:40]}\n"
 
     if d["template"] == "simple":
         cmds = "\n".join([f"  • /{k} ← {v}" for k, v in d["commands"].items()]) or "  لا يوجد"
@@ -441,7 +429,6 @@ async def show_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return STEP_CONFIRM
 
-# ===== إنشاء حزمة البوت وإرسالها =====
 async def create_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -461,17 +448,14 @@ async def create_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     await package_and_send(update, context, bot_package_data)
-
     await context.bot.send_message(
         chat_id=query.message.chat_id,
         text="ماذا تريد أن تفعل بعد ذلك؟",
         reply_markup=main_menu()
     )
-
     del store[uid]
     return ConversationHandler.END
 
-# ===== دوال بناء الأكواد والقوالب =====
 def build_bot_code(d):
     template = d["template"]
     token = d["token"]
@@ -496,11 +480,7 @@ def build_bot_code(d):
     else:
         return None
 
-    return {
-        "bot_code": bot_code,
-        "requirements": requirements,
-        "readme": readme
-    }
+    return {"bot_code": bot_code, "requirements": requirements, "readme": readme}
 
 def generate_readme(d, template_type):
     base = f"""# 🤖 بوت تيليجرام الخاص بك جاهز!
@@ -516,33 +496,23 @@ def generate_readme(d, template_type):
 2. اذهب إلى [Render.com](https://render.com) وأنشئ حساباً.
 3. من لوحة التحكم، اضغط **New +** → **Web Service**.
 4. اختر **Upload your own code** وارفع المجلد الذي يحتوي على الملفات.
-   - أو ارفع الملفات إلى GitHub واختر **Deploy from GitHub**.
 5. في إعدادات الخدمة:
-   - **Name**: أي اسم (مثلاً `my-awesome-bot`).
    - **Environment**: `Python 3`.
    - **Build Command**: `pip install -r requirements.txt`
    - **Start Command**: `python bot.py`
-   - **Environment Variables**: أضف متغير اسمه `BOT_TOKEN` وقيمته التوكن الخاص بك.
+   - **Environment Variables**: أضف متغير `BOT_TOKEN` بتوكن البوت.
 """
     if template_type == "chatgpt":
-        base += f"     - أضف أيضاً `OPENAI_API_KEY` وقيمته: `{d['api_keys'].get('OPENAI_API_KEY', 'YOUR_KEY')}`\n"
-
+        base += f"     - أضف أيضاً `OPENAI_API_KEY` بقيمته.\n"
     base += """
 6. اختر الخطة **Free** واضغط **Create Web Service**.
-7. انتظر دقيقتين حتى تكتمل عملية النشر (ستظهر علامة "Live").
+7. انتظر حتى تكتمل عملية النشر.
 
-## ⏰ الحفاظ على البوت مستيقظاً (عدم التوقف)
+## ⏰ الحفاظ على البوت مستيقظاً
 
-لأن الخطة المجانية على Render تجعل الخدمة تنام بعد 15 دقيقة من عدم النشاط، استخدم خدمة **UptimeRobot** المجانية:
-- اذهب إلى [UptimeRobot](https://uptimerobot.com/) وأنشئ حساباً.
-- أضف مراقب (Monitor) نوعه **HTTP(s)**.
-- أدخل رابط تطبيقك الذي يظهر في Render (مثل `https://my-awesome-bot.onrender.com`).
-- اضبط الفحص كل **5 دقائق**.
+استخدم [UptimeRobot](https://uptimerobot.com/) لزيارة رابط تطبيقك كل 5 دقائق.
 
-🎉 بهذه الطريقة سيبقى بوتك يعمل 24 ساعة طوال أيام الأسبوع دون توقف!
-
-## ❓ الدعم
-إذا واجهت أي مشكلة، تواصل مع صانع البوت.
+🎉 بوتك الآن سيعمل 24/7!
 """
     return base
 
@@ -571,7 +541,6 @@ async def cmd_{safe_cmd}(update, context):
         await ctx.bot.send_message(chat_id="{s['chat_id']}", text={safe_msg})
     app.job_queue.run_repeating({job_name}, interval={s['interval']*60}, first=10)
 '''
-
     return f'''import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -606,8 +575,7 @@ if __name__ == "__main__":
 def build_downloader_bot(d):
     token = d["token"]
     welcome = json.dumps(d["welcome"])
-    return f'''import os
-import asyncio
+    return f'''import os, asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import yt_dlp
@@ -619,13 +587,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
-    await update.message.reply_text("⏳ جاري تحميل الفيديو...")
+    await update.message.reply_text("⏳ جاري التحميل...")
     try:
-        ydl_opts = {{
-            'outtmpl': '%(title)s.%(ext)s',
-            'quiet': True,
-            'format': 'best[height<=720]'
-        }}
+        ydl_opts = {{'outtmpl': '%(title)s.%(ext)s', 'quiet': True, 'format': 'best[height<=720]'}}
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
@@ -732,7 +696,7 @@ async def package_and_send(update: Update, context: ContextTypes.DEFAULT_TYPE, b
         document=zip_buffer,
         filename="my_new_telegram_bot.zip",
         caption="🎁 **حزمة بوتك الجديد جاهزة!**\n\n"
-                "افتح الملف `README.md` داخل الأرشيف لتتبع خطوات النشر السهلة.\n"
+                "افتح الملف `README.md` داخل الأرشيف لتتبع خطوات النشر.\n"
                 "بعد النشر، سيعمل بوتك 24 ساعة دون توقف! 🚀",
         parse_mode="Markdown"
     )
@@ -744,16 +708,13 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del store[uid]
     return ConversationHandler.END
 
-# ===== خادم HTTP وإدارة الإشارات =====
 def run_web_server():
     class HealthHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"Bot Factory Running")
-        def log_message(self, *args):
-            pass
-
+        def log_message(self, *args): pass
     port = int(os.environ.get("PORT", 8080))
     httpd = HTTPServer(("0.0.0.0", port), HealthHandler)
     print(f"✅ خادم HTTP يعمل على المنفذ {port}")
@@ -762,7 +723,7 @@ def run_web_server():
 async def run_bot():
     token = os.environ.get("BOT_TOKEN")
     if not token:
-        print("❌ BOT_TOKEN غير موجود في متغيرات البيئة!")
+        print("❌ BOT_TOKEN غير موجود!")
         return
 
     app = Application.builder().token(token).build()
@@ -803,16 +764,10 @@ async def run_bot():
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
-
-    def signal_handler():
-        print("⚠️ تم استلام إشارة إيقاف، جاري الإغلاق النظيف...")
-        stop_event.set()
-
+    def signal_handler(): stop_event.set()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, signal_handler)
-        except NotImplementedError:
-            pass
+        try: loop.add_signal_handler(sig, signal_handler)
+        except NotImplementedError: pass
 
     await stop_event.wait()
 
