@@ -1,4 +1,4 @@
-# bot_factory.py - بوت صانع البوتات (متوافق مع Render)
+# bot_factory.py - متوافق مع Docker و Render
 import os
 import json
 import logging
@@ -7,6 +7,12 @@ import threading
 import subprocess
 import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import asyncio
+
+# ===== إظهار الإصدار للتشخيص =====
+import telegram
+print(f"✅ إصدار python-telegram-bot: {telegram.__version__}")
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -319,7 +325,6 @@ async def create_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"❌ خطأ في بناء الكود: {e}")
         return ConversationHandler.END
 
-    # استخدام المسار المطلق لمجلد bots داخل دليل العمل الحالي
     base_dir = os.getcwd()
     bots_dir = os.path.join(base_dir, "bots")
     os.makedirs(bots_dir, exist_ok=True)
@@ -330,13 +335,12 @@ async def create_bot(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f.write(code)
 
     try:
-        # تشغيل البوت الفرعي مع تمرير المسار المطلق لـ python
         subprocess.Popen(
             [sys.executable, filename],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
-            cwd=base_dir  # تحديد دليل العمل ليكون نفس دليل المشروع
+            cwd=base_dir
         )
     except Exception as e:
         await query.edit_message_text(f"❌ فشل تشغيل البوت: {e}")
@@ -416,13 +420,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         del store[uid]
     return ConversationHandler.END
 
-def main():
-    token = os.environ.get("BOT_TOKEN")
-    if not token:
-        print("❌ BOT_TOKEN غير موجود في متغيرات البيئة!")
-        return
-
-    # خادم HTTP لمنع Render من إيقاف الخدمة
+def run_web_server():
     class HealthHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
@@ -433,8 +431,14 @@ def main():
 
     port = int(os.environ.get("PORT", 8080))
     httpd = HTTPServer(("0.0.0.0", port), HealthHandler)
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
     print(f"✅ خادم HTTP يعمل على المنفذ {port}")
+    httpd.serve_forever()
+
+async def run_bot():
+    token = os.environ.get("BOT_TOKEN")
+    if not token:
+        print("❌ BOT_TOKEN غير موجود!")
+        return
 
     app = Application.builder().token(token).build()
     conv_handler = ConversationHandler(
@@ -461,8 +465,15 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(show_my_bots, pattern="^my_bots$"))
     app.add_handler(conv_handler)
+
     print("🚀 Bot Factory يعمل...")
-    app.run_polling()
+    await app.run_polling()
+
+async def main_async():
+    # تشغيل خادم HTTP في thread منفصل
+    threading.Thread(target=run_web_server, daemon=True).start()
+    # تشغيل البوت
+    await run_bot()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main_async())
