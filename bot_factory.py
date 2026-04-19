@@ -1,4 +1,4 @@
-# bot_factory.py - متوافق مع Docker و Render
+# bot_factory.py - الإصدار النهائي المتوافق مع Docker و Render
 import os
 import json
 import logging
@@ -6,10 +6,11 @@ import re
 import threading
 import subprocess
 import sys
-from http.server import HTTPServer, BaseHTTPRequestHandler
 import asyncio
+import signal
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ===== إظهار الإصدار للتشخيص =====
+# ===== التحقق من إصدار المكتبة =====
 import telegram
 print(f"✅ إصدار python-telegram-bot: {telegram.__version__}")
 
@@ -24,7 +25,7 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# مراحل المحادثة
+# ===== مراحل المحادثة =====
 (
     STEP_TOKEN, STEP_WELCOME, STEP_CMD_CHOICE, STEP_CMD_NAME,
     STEP_CMD_REPLY, STEP_CMD_MORE, STEP_AUTO_CHOICE, STEP_AUTO_KEYWORD,
@@ -437,10 +438,11 @@ def run_web_server():
 async def run_bot():
     token = os.environ.get("BOT_TOKEN")
     if not token:
-        print("❌ BOT_TOKEN غير موجود!")
+        print("❌ BOT_TOKEN غير موجود في متغيرات البيئة!")
         return
 
     app = Application.builder().token(token).build()
+
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(new_bot_entry, pattern="^new_bot$")],
         states={
@@ -462,18 +464,43 @@ async def run_bot():
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(show_my_bots, pattern="^my_bots$"))
     app.add_handler(conv_handler)
 
     print("🚀 Bot Factory يعمل...")
-    await app.run_polling()
 
-async def main_async():
-    # تشغيل خادم HTTP في thread منفصل
-    threading.Thread(target=run_web_server, daemon=True).start()
-    # تشغيل البوت
-    await run_bot()
+    # تشغيل البوت بشكل متحكم به لاستقبال إشارات الإنهاء
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+
+    # انتظار إشارة الإيقاف (SIGTERM من Render)
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def signal_handler():
+        print("⚠️ تم استلام إشارة إيقاف، جاري الإغلاق النظيف...")
+        stop_event.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, signal_handler)
+        except NotImplementedError:
+            # على بعض الأنظمة (مثل Windows) قد لا تكون add_signal_handler مدعومة
+            pass
+
+    await stop_event.wait()
+
+    # إيقاف البوت بشكل آمن
+    await app.updater.stop()
+    await app.stop()
+    await app.shutdown()
+    print("✅ تم إيقاف البوت بنجاح")
 
 if __name__ == "__main__":
-    asyncio.run(main_async())
+    # تشغيل خادم HTTP في thread منفصل لمنع Render من إيقاف الخدمة
+    threading.Thread(target=run_web_server, daemon=True).start()
+    # تشغيل البوت مع التعامل الكامل مع الإشارات
+    asyncio.run(run_bot())
